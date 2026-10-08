@@ -3160,14 +3160,21 @@ static bool isFirstIdentifier(ParserExpressionImpl::Layers & layers)
     return layers.size() == 1 && dynamic_cast<ExpressionLayer *>(layers.front().get()) != nullptr;
 }
 
-/// Whether the tokens right after the opening bracket of a function call can start a subquery,
-/// possibly wrapped in parentheses: `(SELECT ...`, `(WITH ...`, `(FROM ... SELECT ...`, `((SELECT ...`.
+/// Whether the argument of a function call looks like a single subquery, possibly wrapped in parentheses:
+/// `SELECT ...`, `WITH ...`, `FROM ... SELECT ...`, `(SELECT ...)`, `((SELECT ...)) UNION ALL ...`.
 /// It is a cheap lookahead (no recursive parsing), used to recognize syntax sugar such as `UNIQUE(subquery)`
 /// without reserving the function name for every other call shape.
-static bool canStartSubquery(IParser::Pos pos)
+/// A parenthesized subquery is accepted only when it is the whole argument or is followed by a set operation,
+/// so that `unique((SELECT 1), 2)` or `unique((SELECT 1) + 1)` stay regular function calls with a scalar subquery.
+static bool isSubqueryArgument(IParser::Pos pos)
 {
+    size_t num_opening_brackets = 0;
+    IParser::Pos first_bracket = pos;
     while (pos->type == TokenType::OpeningRoundBracket)
+    {
+        ++num_opening_brackets;
         ++pos;
+    }
 
     Expected expected;
     if (!ParserKeyword(Keyword::SELECT).ignore(pos, expected)
@@ -3176,7 +3183,43 @@ static bool canStartSubquery(IParser::Pos pos)
         return false;
 
     /// A lone keyword is an identifier argument, e.g. `unique(from)` or `unique(select, 1)`.
-    return pos->type != TokenType::ClosingRoundBracket && pos->type != TokenType::Comma;
+    if (pos->type == TokenType::ClosingRoundBracket || pos->type == TokenType::Comma)
+        return false;
+
+    /// An unparenthesized subquery extends to the closing bracket of the function call.
+    if (num_opening_brackets == 0)
+        return true;
+
+    /// Find the bracket that closes the first opening one and look at what follows it.
+    pos = first_bracket;
+    size_t depth = 0;
+    while (pos.isValid())
+    {
+        if (pos->type == TokenType::OpeningRoundBracket || pos->type == TokenType::OpeningSquareBracket)
+        {
+            ++depth;
+        }
+        else if (pos->type == TokenType::ClosingRoundBracket || pos->type == TokenType::ClosingSquareBracket)
+        {
+            if (depth == 0)
+                return false;
+            --depth;
+            if (depth == 0)
+            {
+                ++pos;
+                break;
+            }
+        }
+        ++pos;
+    }
+
+    if (depth != 0 || !pos.isValid())
+        return false;
+
+    return pos->type == TokenType::ClosingRoundBracket
+        || ParserKeyword(Keyword::UNION).checkWithoutMoving(pos, expected)
+        || ParserKeyword(Keyword::EXCEPT).checkWithoutMoving(pos, expected)
+        || ParserKeyword(Keyword::INTERSECT).checkWithoutMoving(pos, expected);
 }
 
 /// `pos` points right after the opening bracket of the function call.
@@ -3244,7 +3287,7 @@ static std::unique_ptr<Layer> getFunctionLayer(
         return std::make_unique<ExistsLayer>();
     /// `UNIQUE(subquery)` is a predicate, but `unique` stays a regular name for any other call shape,
     /// such as a user-defined function `unique(1)` or a parameterized view `FROM unique(x = 1)`.
-    if (function_name_lowercase == "unique" && !(is_table_function && is_first_identifier) && canStartSubquery(pos))
+    if (function_name_lowercase == "unique" && !(is_table_function && is_first_identifier) && isSubqueryArgument(pos))
         return std::make_unique<UniqueLayer>();
     if (function_name_lowercase == "trim")
         return std::make_unique<TrimLayer>(false, false);
