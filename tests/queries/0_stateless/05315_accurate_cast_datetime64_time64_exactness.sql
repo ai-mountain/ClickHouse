@@ -30,6 +30,12 @@ SELECT accurateCast(toDateTime64('1970-01-02 00:00:00', 0, 'UTC'), 'Time64(0)');
 SELECT accurateCastOrNull(toDateTime64('1970-01-02 00:00:00', 0, 'UTC'), 'Time64(0)');
 SELECT accurateCast(toDateTime64('2024-06-01 12:34:56.789', 3, 'UTC'), 'Time64(3)');
 SELECT accurateCastOrNull(materialize(toDateTime64('2024-06-01 12:34:56.789', 3, 'UTC')), 'Time64(3)');
+SELECT accurateCast(toDateTime64('1970-03-01 00:00:00', 0, 'UTC'), 'Time64(0)'), accurateCastOrNull(toDateTime64('1970-03-01 00:00:00', 0, 'UTC'), 'Time64(0)');
+SELECT accurateCastOrNull(toDateTime64('2024-06-01 12:34:56', 0, 'UTC'), 'Time64(3)');
+SELECT accurateCast(toDateTime64('1970-01-01 12:34:56.7891', 4, 'UTC'), 'Time64(3)'); -- { serverError CANNOT_CONVERT_TYPE }
+SELECT accurateCast(materialize(toDateTime64('1970-01-01 12:34:56.7891', 4, 'UTC')), 'Time64(3)'); -- { serverError CANNOT_CONVERT_TYPE }
+SELECT accurateCastOrNull(toDateTime64('1970-01-01 12:34:56.7891', 4, 'UTC'), 'Time64(3)'), accurateCastOrNull(toDateTime64('1970-01-01 12:34:56.7890', 4, 'UTC'), 'Time64(3)');
+SELECT accurateCastOrNull(x, 'Time64(1)') FROM (SELECT materialize(arrayJoin([toDateTime64('1969-12-31 23:59:59.50', 2, 'UTC'), toDateTime64('1969-12-31 23:59:59.25', 2, 'UTC')])) AS x);
 
 SELECT '-- narrowing the scale of the last second';
 SELECT accurateCastOrNull(toDateTime64('9999-12-31 23:59:59.999', 3, 'UTC'), 'DateTime64(1)'), accurateCastOrNull(toDateTime64('9999-12-31 23:59:59.900', 3, 'UTC'), 'DateTime64(1)');

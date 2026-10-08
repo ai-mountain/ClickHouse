@@ -2618,18 +2618,6 @@ struct ConvertImpl
                 if (arguments.size() > 2 && !arguments[2].column.get()->getDataAt(i).empty())
                     time_zone = &DateLUT::instance(arguments[2].column.get()->getDataAt(i));
 
-                // accurateCastOrNull keeps the representability gate: is the rescaled value in range?
-                if constexpr (std::is_same_v<Additions, AccurateOrNullConvertStrategyAdditions>)
-                {
-                    ToFieldType result;
-                    if (!tryConvertDecimals<FromDataType, ToDataType>(vec_from[i], col_from->getScale(), col_to->getScale(), result))
-                    {
-                        vec_to[i] = static_cast<ToFieldType>(0);
-                        (*vec_null_map_to)[i] = true;
-                        continue;
-                    }
-                }
-
                 auto from_scale_mult = DecimalUtils::scaleMultiplier<Time64>(col_from->getScale());
                 auto to_scale_mult = DecimalUtils::scaleMultiplier<Time64>(col_to->getScale());
 
@@ -2652,6 +2640,26 @@ struct ConvertImpl
 
                 /// Reduce/expand the non-negative fraction to the target scale (truncating a positive value floors).
                 Int64 fraction_i = static_cast<Int64>(fraction);
+
+                /// The seconds-of-day result is always within the `Time64` range, so the only way an accurate
+                /// cast can lose information is dropping sub-second digits when the target scale is narrower.
+                if constexpr (std::is_same_v<Additions, AccurateConvertStrategyAdditions>
+                    || std::is_same_v<Additions, AccurateOrNullConvertStrategyAdditions>)
+                {
+                    if (col_to->getScale() < col_from->getScale() && fraction_i % (from_scale_mult / to_scale_mult) != 0)
+                    {
+                        if constexpr (std::is_same_v<Additions, AccurateOrNullConvertStrategyAdditions>)
+                        {
+                            vec_to[i] = static_cast<ToFieldType>(0);
+                            (*vec_null_map_to)[i] = true;
+                            continue;
+                        }
+                        else
+                            throw Exception(ErrorCodes::CANNOT_CONVERT_TYPE, "Value {} cannot be safely converted into type {}",
+                                static_cast<double>(vec_from[i]), ToDataType::family_name);
+                    }
+                }
+
                 Int64 fraction_to = col_to->getScale() >= col_from->getScale()
                     ? fraction_i * (to_scale_mult / from_scale_mult)
                     : fraction_i / (from_scale_mult / to_scale_mult);
