@@ -259,6 +259,10 @@ private:
 
     ProjectionNames resolveUniquePredicate(QueryTreeNodePtr & node, const FunctionNodePtr & function_node_ptr, IdentifierResolveScope & scope, bool allow_niladic_functions);
 
+    QueryTreeNodePtr evaluateUniquePredicate(const QueryTreeNodePtr & rewritten_subquery, IdentifierResolveScope & scope);
+
+    void evaluateUniquePredicatePlaceholdersInConstantArguments(const String & function_name, QueryTreeNodes & arguments, IdentifierResolveScope & scope);
+
     ProjectionNames resolveExpressionNode(
         QueryTreeNodePtr & node,
         IdentifierResolveScope & scope,
@@ -397,6 +401,12 @@ private:
     /// In only-analyze mode the `UNIQUE` predicate placeholder must stay a plain constant in
     /// these contexts instead of being wrapped in `materialize`. See `resolveUniquePredicate`.
     bool constant_expression_in_resolve_process = false;
+
+    /// The `materialize` placeholders that the `UNIQUE` predicate is resolved to in only-analyze mode.
+    /// If such a placeholder becomes an argument that a function requires to be constant
+    /// (`IFunctionOverloadResolver::getArgumentsThatAreAlwaysConstant`), it is replaced by the real value.
+    /// The nodes are held here, so their addresses are never reused by other nodes during the analysis.
+    std::unordered_set<QueryTreeNodePtr> unique_predicate_placeholders;
 };
 
 }

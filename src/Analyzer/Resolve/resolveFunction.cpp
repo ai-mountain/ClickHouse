@@ -1448,10 +1448,19 @@ ProjectionNames QueryAnalyzer::resolveUniquePredicate(
         placeholder_wrapper_node->getArguments().getNodes().push_back(std::move(placeholder_const_node));
         auto placeholder_wrapper_function = FunctionFactory::instance().get("materialize", scope.context);
         placeholder_wrapper_node->resolveAsFunction(placeholder_wrapper_function->build(placeholder_wrapper_node->getArgumentColumns()));
+        unique_predicate_placeholders.insert(placeholder_wrapper_node);
         node = std::move(placeholder_wrapper_node);
         return {unique_projection_name};
     }
 
+    node = evaluateUniquePredicate(new_unique_subquery, scope);
+    return {std::move(unique_projection_name)};
+}
+
+/// Execute the rewritten `UNIQUE` subquery and return the result as a `UInt8` `ConstantNode`.
+QueryTreeNodePtr QueryAnalyzer::evaluateUniquePredicate(const QueryTreeNodePtr & rewritten_subquery, IdentifierResolveScope & scope)
+{
+    QueryTreeNodePtr new_unique_argument = rewritten_subquery;
     evaluateScalarSubqueryIfNeeded(new_unique_argument, scope, false);
     const auto * const_node = new_unique_argument->as<ConstantNode>();
     if (!const_node || const_node->getColumn()->isNullAt(0))
@@ -1470,9 +1479,42 @@ ProjectionNames QueryAnalyzer::resolveUniquePredicate(
     /// query tree node" whenever the predicate is nested inside another expression (for example
     /// `uniq(UNIQUE(...), b)` in ORDER BY). The rewritten subquery is the same representation that
     /// scalar subqueries fold to, so the planner treats it as an already-evaluated constant.
-    auto result_const_node = std::make_shared<ConstantNode>(std::move(const_value), new_unique_subquery);
-    node = std::move(result_const_node);
-    return {std::move(unique_projection_name)};
+    return std::make_shared<ConstantNode>(std::move(const_value), rewritten_subquery);
+}
+
+/// In only-analyze mode the `UNIQUE` predicate is resolved to a non-constant placeholder (see `resolveUniquePredicate`),
+/// but some functions require specific arguments to be constant, e.g. the index of `tupleElement`.
+/// Execution folds the predicate to a real constant there, so evaluate it for real in such argument positions too,
+/// otherwise dry-run paths (`CREATE VIEW`, `EXPLAIN`, ...) would reject queries that execute successfully.
+void QueryAnalyzer::evaluateUniquePredicatePlaceholdersInConstantArguments(
+    const String & function_name, QueryTreeNodes & arguments, IdentifierResolveScope & scope)
+{
+    if (unique_predicate_placeholders.empty())
+        return;
+
+    bool has_placeholder_argument = false;
+    for (const auto & argument : arguments)
+        has_placeholder_argument |= unique_predicate_placeholders.contains(argument);
+
+    if (!has_placeholder_argument)
+        return;
+
+    auto function = FunctionFactory::instance().tryGet(function_name, scope.context);
+    if (!function)
+        return;
+
+    bool previous_constant_expression_in_resolve_process = constant_expression_in_resolve_process;
+    constant_expression_in_resolve_process = true;
+    SCOPE_EXIT({ constant_expression_in_resolve_process = previous_constant_expression_in_resolve_process; });
+
+    for (auto argument_index : function->getArgumentsThatAreAlwaysConstant())
+    {
+        if (argument_index >= arguments.size() || !unique_predicate_placeholders.contains(arguments[argument_index]))
+            continue;
+
+        const auto & placeholder_constant = arguments[argument_index]->as<FunctionNode &>().getArguments().getNodes().at(0)->as<ConstantNode &>();
+        arguments[argument_index] = evaluateUniquePredicate(placeholder_constant.getSourceExpression(), scope);
+    }
 }
 
 /** Resolve function node in scope.
@@ -2492,6 +2534,8 @@ ProjectionNames QueryAnalyzer::resolveFunction(QueryTreeNodePtr & node, Identifi
         true /*allow_lambda_expression*/,
         allow_table_expressions /*allow_table_expression*/,
         allow_niladic_functions);
+
+    evaluateUniquePredicatePlaceholdersInConstantArguments(function_name, function_node_ptr->getArguments().getNodes(), scope);
 
     /// Mask arguments if needed
     if (!canDisplaySecrets(scope.context))
